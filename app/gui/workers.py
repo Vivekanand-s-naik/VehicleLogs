@@ -1,19 +1,24 @@
 """
-Background QThread Workers for Non-Blocking Native GUI Responsiveness
-=====================================================================
-Keeps ONNX model loading, live video frame conversion, and camera index
-enumeration completely off the PyQt6 main GUI thread.
+Background Thread Workers for Non-Blocking Native GUI Responsiveness
+====================================================================
+Uses QObject (for thread-safe Qt signals queued onto the GUI event loop)
+paired with standard Python `threading.Thread`. This guarantees 100%
+compatibility with Nuitka-compiled PyQt6 standalone executables (avoiding
+Nuitka's known caveat with overriding C++ `QThread.run()` in PyQt6) while
+keeping ONNX model loading, live video frame conversion, and camera index
+enumeration completely off the main GUI thread.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QImage
 
 from app.gui.backend_bridge import BackendBridge
@@ -29,14 +34,44 @@ def bgr_to_qimage(frame: np.ndarray) -> QImage:
     return QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
 
 
-class EngineInitWorker(QThread):
+class _ThreadWorkerBase(QObject):
+    """QObject base backed by a daemon Python threading.Thread (Nuitka + PyQt6 safe)."""
+
+    def __init__(self, thread_name: str, parent=None):
+        super().__init__(parent)
+        self._thread_name = thread_name
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self.run,
+            name=self._thread_name,
+            daemon=True,
+        )
+        self._thread.start()
+
+    def isRunning(self) -> bool:
+        return bool(self._thread is not None and self._thread.is_alive())
+
+    def wait(self, timeout_ms: int = 2000) -> bool:
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=max(0.1, timeout_ms / 1000.0))
+        return not self.isRunning()
+
+    def run(self) -> None:
+        raise NotImplementedError
+
+
+class EngineInitWorker(_ThreadWorkerBase):
     """Loads ONNX Runtime DirectML/CPU detectors + OCR engines and starts the pipeline off-thread."""
 
     ready = pyqtSignal()
     failed = pyqtSignal(str)
 
     def __init__(self, bridge: BackendBridge, auto_start: bool = True, parent=None):
-        super().__init__(parent)
+        super().__init__("ANPREngineInitThread", parent)
         self.bridge = bridge
         self.auto_start = auto_start
 
@@ -51,7 +86,7 @@ class EngineInitWorker(QThread):
             self.failed.emit(str(exc))
 
 
-class VideoFeedWorker(QThread):
+class VideoFeedWorker(_ThreadWorkerBase):
     """
     Polls EventService's latest annotated BGR frame (with vehicle/plate bboxes & OCR overlays)
     at up to ~30 FPS, converts to QImage off-thread, and emits `frame_ready`.
@@ -60,17 +95,21 @@ class VideoFeedWorker(QThread):
     frame_ready = pyqtSignal(QImage)
 
     def __init__(self, bridge: BackendBridge, parent=None):
-        super().__init__(parent)
+        super().__init__("ANPRVideoFeedThread", parent)
         self.bridge = bridge
-        self._running = True
+        self._stop_event = threading.Event()
+
+    def start(self) -> None:
+        self._stop_event.clear()
+        super().start()
 
     def stop(self) -> None:
-        self._running = False
+        self._stop_event.set()
         self.wait(2000)
 
     def run(self) -> None:
         last_id = -1
-        while self._running:
+        while not self._stop_event.is_set():
             svc = self.bridge.event_service
             if svc is None or not svc.is_running:
                 time.sleep(0.08)
@@ -90,13 +129,13 @@ class VideoFeedWorker(QThread):
                 time.sleep(0.03)
 
 
-class CameraProbeWorker(QThread):
+class CameraProbeWorker(_ThreadWorkerBase):
     """Enumerates local camera indices via cv2.VideoCapture off the GUI thread."""
 
     devices_ready = pyqtSignal(list)
 
     def __init__(self, bridge: BackendBridge, max_index: int = 6, parent=None):
-        super().__init__(parent)
+        super().__init__("ANPRCameraProbeThread", parent)
         self.bridge = bridge
         self.max_index = max_index
 
