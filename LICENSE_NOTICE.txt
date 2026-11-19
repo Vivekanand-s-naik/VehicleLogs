@@ -1,0 +1,44 @@
+================================================================================
+SOFTWARE LICENSE & PERIODIC VERIFICATION NOTICE
+================================================================================
+
+Before running this application, please note the following disclosed licensing
+behavior:
+
+1. Startup & Periodic Online License Check
+   When this application starts — and periodically while it remains running
+   (default: once per hour) — it makes an encrypted HTTPS request to the
+   licensor's license validation server to verify that your license is active.
+
+2. Minimal Information Sent
+   Each validation request sends ONLY:
+     - Your assigned license key (configured in `.env`)
+     - A one-way SHA-256 hashed device identifier (to bind the license to
+       this machine; it cannot be reversed to personal information)
+     - The application version number
+
+   This check does NOT collect or transmit camera video, captured images,
+   recognized number plates, local files, keystrokes, screenshots, or user
+   credentials, and it does NOT provide remote access to your computer.
+
+3. Remote Disable / Revocation & Offline Grace Period
+   - If the license server confirms the license is "active", the application
+     runs normally.
+   - If the license is "revoked" or "expired" by the licensor, the application
+     displays a clear notice explaining why it cannot run and exits.
+   - If the license server cannot be reached temporarily (for example, during
+     an internet outage), the application allows a limited offline grace period
+     (default: 72 hours after the last successful online check). Once that grace
+     period expires without a successful check, the application will display a
+     notice and exit until connectivity is restored.
+
+4. Transparent Local Logging
+   Every license check attempt — including timestamp, endpoint URL, masked
+   license key, and result — is written to `logs/license.log` in the
+   application folder so you can inspect the exact behavior at any time.
+
+5. Support
+   If you believe your license has been disabled in error, or if you need to
+   renew or transfer a license, please contact the licensor at the support
+   contact configured in `.env` (`LICENSE_SUPPORT_CONTACT`).
+================================================================================

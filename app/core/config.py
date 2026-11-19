@@ -4,12 +4,21 @@ Application Configuration using Pydantic Settings
 Validates environment variables and provides structured system settings.
 """
 
+import sys
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+def _resolve_base_dir() -> Path:
+    """Resolve workspace root for both source runs and Nuitka standalone builds."""
+    if "__compiled__" in globals() or getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+BASE_DIR = _resolve_base_dir()
 
 
 class Settings(BaseSettings):
@@ -41,8 +50,14 @@ class Settings(BaseSettings):
     CAMERA_RECONNECT_MAX_DELAY: float = Field(default=30.0, description="Max retry delay in seconds")
 
     # Vision & Models
-    YOLO_MODEL_PATH: str = Field(default="models/license_plate_detector.pt", description="Path to license plate YOLO weights")
-    VEHICLE_MODEL_PATH: str = Field(default="models/vehicle_detector.pt", description="Path to vehicle YOLO weights")
+    INFERENCE_BACKEND: str = Field(
+        default="onnx",
+        description="Inference runtime backend: 'onnx' (lightweight DirectML/CPU, no PyTorch), 'pytorch', or 'auto'"
+    )
+    YOLO_MODEL_PATH: str = Field(default="models/license_plate_detector.pt", description="Path to license plate PyTorch weights")
+    VEHICLE_MODEL_PATH: str = Field(default="models/vehicle_detector.pt", description="Path to vehicle PyTorch weights")
+    PLATE_ONNX_MODEL_PATH: str = Field(default="models/license_plate_detector.onnx", description="Path to license plate ONNX model")
+    VEHICLE_ONNX_MODEL_PATH: str = Field(default="models/vehicle_detector.onnx", description="Path to vehicle ONNX model")
     DETECTION_CONFIDENCE: float = Field(default=0.25, description="Min confidence for plate detection (catches distant plates too)")
     VEHICLE_CONFIDENCE: float = Field(default=0.35, description="Min confidence for vehicle detection")
     IOU_THRESHOLD: float = Field(default=0.45, description="IoU threshold for NMS")
@@ -115,6 +130,27 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     API_KEY: Optional[str] = Field(default=None, description="Optional API key for administrative endpoints")
+
+    # Disclosed Licensing & Remote Kill Switch
+    LICENSE_CHECK_ENABLED: bool = Field(
+        default=False,
+        description="Enable startup & periodic HTTPS license check (enabled in packaged Windows builds)"
+    )
+    LICENSE_SERVER_URL: str = Field(
+        default="https://my-license-server.example.com/api/v1/validate",
+        description="HTTPS endpoint for startup/periodic license validation"
+    )
+    LICENSE_KEY: str = Field(default="", description="Customer license key assigned by licensor")
+    LICENSE_SUPPORT_CONTACT: str = Field(
+        default="support@yourcompany.example.com",
+        description="Support contact displayed if license is inactive"
+    )
+    LICENSE_GRACE_HOURS: float = Field(default=72.0, description="Offline grace window (hours) after last active check")
+    LICENSE_TIMEOUT_SECONDS: float = Field(default=6.0, description="HTTPS timeout for license server")
+    LICENSE_MAX_RETRIES: int = Field(default=3, description="Retry attempts on transient network failures")
+    LICENSE_RECHECK_INTERVAL_SECONDS: int = Field(default=3600, description="Periodic license check interval (seconds)")
+    LICENSE_LOG_PATH: Path = Field(default=BASE_DIR / "logs" / "license.log")
+    LICENSE_CACHE_PATH: Path = Field(default=BASE_DIR / "logs" / ".license_state.json")
 
     def resolve_model_path(self, relative_path: str) -> Path:
         """Resolve model path relative to BASE_DIR if not absolute."""

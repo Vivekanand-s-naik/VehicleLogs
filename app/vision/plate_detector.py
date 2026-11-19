@@ -1,14 +1,16 @@
 """
-License Plate Detector (YOLOv8)
-===============================
-Runs dedicated YOLOv8 license plate detection model with dynamic device execution.
-Filters invalid aspect ratios, applies NMS, and returns plate bounding boxes.
+License Plate Detector (ONNX Runtime Primary / PyTorch Fallback)
+================================================================
+Runs the exported FP32 YOLOv8 license plate ONNX model via ONNX Runtime
+(prioritizing DirectML GPU on Windows, falling back cleanly to CPU) with
+zero PyTorch/Ultralytics runtime dependency when INFERENCE_BACKEND='onnx'.
+Retains optional PyTorch/Ultralytics support for parity benchmarking & dev.
 """
 
 import logging
 import threading
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional
 import numpy as np
 from app.core.config import settings
 from app.core.device import resolve_device
@@ -45,30 +47,72 @@ class PlateDetector:
     _instance: Optional["PlateDetector"] = None
     _instance_lock = threading.Lock()
 
-    def __init__(self, weights_path: Optional[str] = None, device: Optional[str] = None):
-        path = settings.resolve_model_path(weights_path or settings.YOLO_MODEL_PATH)
-        if not path.exists():
-            raise WeightsNotFoundError(f"License plate model weights not found at: {path}")
-
-        resolved_dev, diag = resolve_device(device or settings.DEVICE)
-        self.device = resolved_dev
+    def __init__(
+        self,
+        weights_path: Optional[str] = None,
+        device: Optional[str] = None,
+        backend: Optional[str] = None,
+    ):
         self.conf_threshold = settings.DETECTION_CONFIDENCE
         self.iou_threshold = settings.IOU_THRESHOLD
         self.imgsz = settings.PLATE_DETECT_IMGSZ
-        self.half = bool(settings.USE_HALF_PRECISION and str(self.device).startswith("cuda"))
         self._lock = threading.Lock()
 
-        logger.info(f"Loading License Plate Detector from '{path}' on '{self.device}'...")
-        try:
-            from ultralytics import YOLO
-            self.model = YOLO(str(path))
-            dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
-            for _ in range(2):
-                self.model.predict(dummy, device=self.device, imgsz=self.imgsz, verbose=False)
-            logger.info("License Plate Detector loaded and pre-warmed successfully.")
-        except Exception as e:
-            logger.error(f"Failed to initialize License Plate Detector: {e}")
-            raise ModelError(f"Plate model initialization failure: {e}")
+        chosen_backend = (backend or settings.INFERENCE_BACKEND or "onnx").strip().lower()
+        onnx_path = settings.resolve_model_path(
+            weights_path if (weights_path and str(weights_path).lower().endswith(".onnx"))
+            else settings.PLATE_ONNX_MODEL_PATH
+        )
+        pt_path = settings.resolve_model_path(
+            weights_path if (weights_path and str(weights_path).lower().endswith(".pt"))
+            else settings.YOLO_MODEL_PATH
+        )
+
+        use_onnx = (
+            chosen_backend == "onnx"
+            or (chosen_backend == "auto" and onnx_path.exists())
+            or (weights_path is not None and str(weights_path).lower().endswith(".onnx"))
+        )
+
+        self.backend = "onnx" if use_onnx else "pytorch"
+        self.onnx_detector = None
+        self.model = None
+        self.device = "onnx"
+
+        if use_onnx:
+            if not onnx_path.exists():
+                raise WeightsNotFoundError(
+                    f"License plate ONNX model not found at '{onnx_path}'. Run `python export_to_onnx.py`."
+                )
+            try:
+                from app.vision.inference_onnx import ONNXYOLODetector
+                self.onnx_detector = ONNXYOLODetector(
+                    model_path=onnx_path,
+                    conf_threshold=self.conf_threshold,
+                    iou_threshold=self.iou_threshold,
+                    class_names={0: "license_plate"},
+                )
+                self.device = self.onnx_detector.active_providers[0]
+                logger.info(f"PlateDetector using ONNX Runtime ({self.device}) -> {onnx_path.name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize ONNX License Plate Detector: {e}")
+                raise ModelError(f"Plate ONNX initialization failure: {e}")
+        else:
+            if not pt_path.exists():
+                raise WeightsNotFoundError(f"License plate model weights not found at: {pt_path}")
+            resolved_dev, _ = resolve_device(device or settings.DEVICE)
+            self.device = resolved_dev
+            logger.info(f"Loading PyTorch License Plate Detector from '{pt_path}' on '{self.device}'...")
+            try:
+                from ultralytics import YOLO
+                self.model = YOLO(str(pt_path))
+                dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+                for _ in range(2):
+                    self.model.predict(dummy, device=self.device, imgsz=self.imgsz, verbose=False)
+                logger.info("PyTorch License Plate Detector loaded and pre-warmed successfully.")
+            except Exception as e:
+                logger.error(f"Failed to initialize PyTorch License Plate Detector: {e}")
+                raise ModelError(f"Plate model initialization failure: {e}")
 
     @classmethod
     def get_instance(cls) -> "PlateDetector":
@@ -90,9 +134,31 @@ class PlateDetector:
         if frame is None or frame.size == 0:
             return []
 
-        use_imgsz = imgsz or self.imgsz
         use_conf = conf if conf is not None else self.conf_threshold
+        detections: List[PlateDetection] = []
 
+        if self.onnx_detector is not None:
+            try:
+                raw_dets = self.onnx_detector.predict(
+                    frame, conf=use_conf, iou=self.iou_threshold
+                )
+            except Exception as e:
+                logger.error(f"Error during ONNX plate detection inference: {e}")
+                return []
+
+            for d in raw_dets:
+                x1, y1, x2, y2 = d.bbox
+                w, h = x2 - x1, y2 - y1
+                if w < 14 or h < 8:
+                    continue
+                aspect = w / max(1, h)
+                if aspect < 0.80 or aspect > 8.0:
+                    continue
+                detections.append(PlateDetection((x1, y1, x2, y2), d.confidence, d.class_id))
+            return detections
+
+        # PyTorch / Ultralytics fallback path
+        use_imgsz = imgsz or self.imgsz
         try:
             with self._lock:
                 results = self.model.predict(
@@ -101,19 +167,17 @@ class PlateDetector:
                     iou=self.iou_threshold,
                     device=self.device,
                     imgsz=use_imgsz,
-                    verbose=False
+                    verbose=False,
                 )
         except Exception as e:
-            logger.error(f"Error during plate detection inference: {e}")
+            logger.error(f"Error during PyTorch plate detection inference: {e}")
             return []
 
-        detections: List[PlateDetection] = []
         if not results or not results[0].boxes:
             return detections
 
         boxes = results[0].boxes
         img_h, img_w = frame.shape[:2]
-
         for i in range(len(boxes)):
             det_conf = float(boxes.conf[i].cpu().item())
             cls_id = int(boxes.cls[i].cpu().item())
@@ -123,18 +187,12 @@ class PlateDetector:
             y1 = max(0, min(img_h - 1, int(xyxy[1])))
             x2 = max(0, min(img_w, int(xyxy[2])))
             y2 = max(0, min(img_h, int(xyxy[3])))
-
-            w = x2 - x1
-            h = y2 - y1
-
-            # Allow small/distant plates (down to 14x8px) so clip recording triggers early
+            w, h = x2 - x1, y2 - y1
             if w < 14 or h < 8:
                 continue
-
             aspect = w / max(1, h)
             if aspect < 0.80 or aspect > 8.0:
                 continue
-
             detections.append(PlateDetection((x1, y1, x2, y2), det_conf, cls_id))
 
         return detections

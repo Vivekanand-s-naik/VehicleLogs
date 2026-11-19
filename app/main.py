@@ -8,13 +8,15 @@ Serves:
 - OpenAPI / Swagger interactive documentation at '/docs'
 """
 
+import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from app.core.config import settings
+from app.core.config import settings, BASE_DIR
+from app.core.license_check import enforce_license_or_exit, LicenseMonitor
 from app.core.logging_config import setup_logging
 from app.core.exceptions import ANPRError
 from app.database.connection import init_db
@@ -22,12 +24,19 @@ from app.services.event_service import EventService
 from app.api.routes import vehicles, events, cameras, system, auth
 
 logger = setup_logging()
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = BASE_DIR / "app" / "static"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycles."""
+    # Ensure license check runs even when launched directly via `uvicorn app.main:app`
+    license_monitor = None
+    if settings.LICENSE_CHECK_ENABLED and os.environ.get("_ANPR_LICENSE_VERIFIED_PID") != str(os.getpid()):
+        enforce_license_or_exit(force=True)
+        license_monitor = LicenseMonitor()
+        license_monitor.start()
+
     logger.info("Initializing database and seeding RBAC users...")
     init_db()
 
@@ -39,6 +48,8 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down ANPR Vision & Event pipeline...")
     event_service.stop()
+    if license_monitor is not None:
+        license_monitor.stop()
     logger.info("Application shutdown complete.")
 
 

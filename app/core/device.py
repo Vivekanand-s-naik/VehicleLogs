@@ -22,11 +22,35 @@ def resolve_device(preferred: str = "auto") -> Tuple[str, Dict[str, Any]]:
     Returns:
         (resolved_device_str, diagnostics_dict)
     """
+    ort_providers = []
+    try:
+        import onnxruntime as ort
+        ort_providers = list(ort.get_available_providers())
+    except Exception:
+        pass
+
+    normalized_pref = (preferred or "auto").strip().lower()
+
     try:
         import torch
     except ImportError:
-        logger.warning("PyTorch not installed. Falling back to CPU.")
-        return "cpu", {"device": "cpu", "name": "CPU (PyTorch missing)", "cuda_available": False}
+        if normalized_pref != "cpu" and "DmlExecutionProvider" in ort_providers:
+            logger.info("Using ONNX Runtime DirectML GPU acceleration (PyTorch-free runtime).")
+            return "dml", {
+                "device": "dml",
+                "name": "Windows DirectML GPU (ONNX Runtime)",
+                "cuda_available": False,
+                "onnx_providers": ort_providers,
+                "cpu_count": os.cpu_count(),
+            }
+        logger.info("Using ONNX Runtime CPU execution (PyTorch-free runtime).")
+        return "cpu", {
+            "device": "cpu",
+            "name": "CPU (ONNX Runtime)" if ort_providers else "CPU",
+            "cuda_available": False,
+            "onnx_providers": ort_providers,
+            "cpu_count": os.cpu_count(),
+        }
 
     cuda_available = torch.cuda.is_available()
     device_str = "cpu"
@@ -35,9 +59,8 @@ def resolve_device(preferred: str = "auto") -> Tuple[str, Dict[str, Any]]:
         "cuda_available": cuda_available,
         "cuda_version": torch.version.cuda if cuda_available else None,
         "device_count": torch.cuda.device_count() if cuda_available else 0,
+        "onnx_providers": ort_providers,
     }
-
-    normalized_pref = (preferred or "auto").strip().lower()
 
     if normalized_pref == "auto":
         if cuda_available and torch.cuda.device_count() > 0:
@@ -136,7 +159,22 @@ def easyocr_gpu_flag(device_str: str) -> bool:
 
 
 def get_device_diagnostics() -> Dict[str, Any]:
-    """Return live device diagnostics including VRAM usage if on CUDA."""
+    """Return live device diagnostics including ONNX Runtime providers and GPU VRAM if available."""
+    ort_providers = []
+    try:
+        import onnxruntime as ort
+        ort_providers = list(ort.get_available_providers())
+    except Exception:
+        pass
+
+    if "DmlExecutionProvider" in ort_providers:
+        return {
+            "active_device": "dml",
+            "device_name": "Windows DirectML GPU (ONNX Runtime)",
+            "onnx_providers": ort_providers,
+            "cpu_count": os.cpu_count(),
+        }
+
     try:
         import torch
         if torch.cuda.is_available() and torch.cuda.device_count() > 0:
@@ -152,11 +190,13 @@ def get_device_diagnostics() -> Dict[str, Any]:
                 "allocated_vram_mb": round(allocated, 2),
                 "free_vram_mb": round(total - reserved, 2),
                 "utilization_pct": round((allocated / total) * 100, 1) if total > 0 else 0,
+                "onnx_providers": ort_providers,
             }
     except Exception:
         pass
     return {
         "active_device": "cpu",
-        "device_name": "CPU",
-        "cpu_count": os.cpu_count()
+        "device_name": "CPU (ONNX Runtime)" if ort_providers else "CPU",
+        "onnx_providers": ort_providers,
+        "cpu_count": os.cpu_count(),
     }

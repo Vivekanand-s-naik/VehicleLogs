@@ -243,4 +243,5 @@ All 31 unit, integration, and security tests will execute:
 | `API_PORT` | `8000` | Port for Web UI and REST API |
 
 #   V e h i c l e L o g s  
+ #   V e h i c l e L o g s  
  
