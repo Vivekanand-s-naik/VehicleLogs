@@ -1,0 +1,35 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Database & SQLite files
+*.db
+*.db-wal
+*.db-shm
+vehicle_logs.db
+backups/*.db
+
+# Captured images
+captures/vehicles/*.jpg
+captures/plates/*.jpg
+captures/events/*.jpg
+
+# Logs
+logs/*.log
+
+# YOLO Models
+models/*.pt
+
+# OS files
+.DS_Store
+Thumbs.db
+
