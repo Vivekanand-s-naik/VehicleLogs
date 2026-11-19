@@ -1,12 +1,15 @@
 # ==============================================================================
 # Minimal Windows Runtime Dependencies (Zero PyTorch / Ultralytics / CUDA)
 # ==============================================================================
-# Designed for lightweight Windows deployment via ONNX Runtime DirectML + CPU
-# and Nuitka standalone compilation (see build_exe.bat).
+# Designed for lightweight native Windows desktop deployment via PyQt6,
+# ONNX Runtime DirectML + CPU, and Nuitka standalone compilation (build_exe.bat).
 #
 # Excluded from runtime (development/training only):
 #   torch, torchvision, ultralytics, easyocr, onnx, streamlit, pytest, scipy
 # ==============================================================================
+
+# Native Windows Desktop GUI
+PyQt6>=6.7.0
 
 # Lightweight ONNX Inference (DirectML GPU acceleration on Windows + CPU fallback)
 onnxruntime-directml>=1.17.0
@@ -17,7 +20,7 @@ numpy>=1.24.0,<2.3.0
 rapidocr-onnxruntime>=1.4.0
 fast-plate-ocr>=1.0.0
 
-# Production REST API & Responsive Web UI Server
+# Internal Backend Engine (FastAPI / Pydantic — loopback-only / in-process)
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 pydantic-settings>=2.2.0

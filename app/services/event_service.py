@@ -159,6 +159,10 @@ class EventService:
                 cls._instance = cls()
         return cls._instance
 
+    @property
+    def is_running(self) -> bool:
+        return bool(self._worker_thread is not None and self._worker_thread.is_alive())
+
     def start(self):
         """Start camera capture, clip processor, OCR worker, and live pipeline threads."""
         self.camera_manager.start()

@@ -9,13 +9,71 @@ exponential backoff. Supports synthetic frame generation for headless tests.
 import time
 import threading
 import logging
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 from app.core.config import settings
 from app.core.exceptions import CameraError, CameraDisconnectedError
 
 logger = logging.getLogger("anpr.camera")
+
+
+def enumerate_video_devices(
+    max_index: int = 6,
+    active_source: Optional[str] = None,
+    active_resolution: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """
+    Enumerate available local camera devices via cv2.VideoCapture index probing
+    without disrupting a currently open active camera index.
+    Always includes the built-in Synthetic Test Feed as a fallback option.
+    """
+    devices: List[Dict[str, str]] = []
+    active_idx: Optional[int] = None
+    if active_source is not None:
+        try:
+            active_idx = int(str(active_source).strip())
+        except (ValueError, TypeError):
+            active_idx = None
+
+    use_dshow = hasattr(cv2, "CAP_DSHOW")
+    for idx in range(max_index):
+        if active_idx is not None and idx == active_idx:
+            res_suffix = f" ({active_resolution})" if active_resolution else " (Active)"
+            devices.append({
+                "source": str(idx),
+                "label": f"Camera {idx}{res_suffix}",
+                "kind": "webcam",
+            })
+            continue
+
+        cap = None
+        try:
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW) if use_dshow else cv2.VideoCapture(idx)
+            if cap is not None and cap.isOpened():
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                res_str = f" ({w}x{h})" if (w > 0 and h > 0) else ""
+                devices.append({
+                    "source": str(idx),
+                    "label": f"Camera {idx}{res_str}",
+                    "kind": "webcam",
+                })
+        except Exception as exc:
+            logger.debug(f"Camera probe failed for index {idx}: {exc}")
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+    devices.append({
+        "source": "synthetic",
+        "label": "Synthetic Test Feed (Gate 1)",
+        "kind": "synthetic",
+    })
+    return devices
 
 
 class CameraManager:
@@ -217,10 +275,35 @@ class CameraManager:
     def reconnect(self) -> bool:
         """Trigger an immediate reconnect attempt."""
         logger.info("Manual camera reconnect requested.")
-        self._is_connected = False
-        self._release_capture()
-        self.reconnect_attempts = 0
+        with self._lock:
+            self._is_connected = False
+            self._release_capture()
+            self.reconnect_attempts = 0
         return self._open_capture()
+
+    def switch_source(self, new_source: str) -> bool:
+        """
+        Live-switch the active video source (camera index, video file path, or 'synthetic')
+        without restarting the application.
+        """
+        new_src = str(new_source).strip()
+        logger.info(f"Switching camera source from '{self.source}' -> '{new_src}'...")
+        was_running = self._thread is not None and self._thread.is_alive()
+        if was_running:
+            self.stop()
+
+        self.source = new_src
+        settings.CAMERA_SOURCE = new_src
+        self._is_synthetic = (new_src.lower() == "synthetic")
+        self.reconnect_attempts = 0
+        self.consecutive_read_failures = 0
+        with self._lock:
+            self._latest_frame = None
+
+        opened = self._open_capture()
+        if was_running:
+            self.start()
+        return opened
 
     def _generate_synthetic_frame(self) -> np.ndarray:
         """

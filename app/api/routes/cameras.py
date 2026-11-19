@@ -6,6 +6,7 @@ Endpoints for camera status, reconnection, and live MJPEG video streaming.
 
 import time
 import cv2
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from app.api.dependencies import get_camera_service, get_event_service, verify_api_key
@@ -14,6 +15,29 @@ from app.services.event_service import EventService
 from app.schemas.system import CameraStatusResponse
 
 router = APIRouter(prefix="/camera", tags=["Camera"])
+
+
+class SwitchCameraRequest(BaseModel):
+    source: str
+
+
+@router.get("/devices")
+def list_camera_devices(camera_service: CameraService = Depends(get_camera_service)):
+    """Enumerate available local camera devices plus the synthetic test source."""
+    return {
+        "active_source": str(camera_service.camera_manager.source),
+        "devices": camera_service.list_cameras(),
+    }
+
+
+@router.post("/switch", dependencies=[Depends(verify_api_key)])
+def switch_camera_source(
+    req: SwitchCameraRequest,
+    camera_service: CameraService = Depends(get_camera_service),
+):
+    """Switch active camera source live."""
+    ok = camera_service.switch_source(req.source)
+    return {"status": "switched" if ok else "pending_reconnect", "details": camera_service.get_status()}
 
 
 @router.get("/status", response_model=CameraStatusResponse)

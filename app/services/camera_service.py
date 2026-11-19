@@ -6,9 +6,9 @@ and reconnection operations.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from app.core.config import settings
-from app.vision.camera_manager import CameraManager
+from app.vision.camera_manager import CameraManager, enumerate_video_devices
 
 logger = logging.getLogger("anpr.camera_service")
 
@@ -35,6 +35,18 @@ class CameraService:
 
     def reconnect(self) -> bool:
         return self.camera_manager.reconnect()
+
+    def switch_source(self, new_source: str) -> bool:
+        return self.camera_manager.switch_source(new_source)
+
+    def list_cameras(self, max_index: int = 6) -> List[Dict[str, str]]:
+        active_src = str(self.camera_manager.source) if self.camera_manager.is_connected else None
+        active_res = f"{self.camera_manager.width}x{self.camera_manager.height}"
+        return enumerate_video_devices(
+            max_index=max_index,
+            active_source=active_src,
+            active_resolution=active_res,
+        )
 
     def get_status(self) -> Dict[str, Any]:
         return {

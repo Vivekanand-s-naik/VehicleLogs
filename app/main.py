@@ -101,4 +101,5 @@ if STATIC_DIR.exists():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=False)
+    # Strictly loopback-only when run as an internal engine
+    uvicorn.run("app.main:app", host="127.0.0.1", port=settings.API_PORT, reload=False)

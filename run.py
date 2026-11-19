@@ -1,21 +1,25 @@
 """
-ANPR System Master Launcher
-===========================
-Launches the Production Backend & Responsive Web UI (Desktop & Mobile).
-Runs the disclosed startup license check, dynamic hardware/ONNX Runtime
-resolution, and serves the FastAPI application cleanly in both console and
-Nuitka console-disabled Windows standalone builds.
+ANPR Gate Control — Native Windows Desktop Launcher (PyQt6)
+===========================================================
+Startup sequence:
+  1. Register bundled ONNX Runtime / DirectML DLL directories (Nuitka builds).
+  2. Redirect stdio safely when running with `--windows-console-mode=disable`.
+  3. Run disclosed startup HTTPS license check (`license_check.py`) BEFORE any
+     window opens; show clear visible MessageBox and exit on failure.
+  4. Initialize SQLite database & default RBAC accounts (admin / guard / auditor).
+  5. Show native PyQt6 RBAC Login Dialog before opening the Main Window.
+  6. Launch native PyQt6 Main Window with live ONNX Runtime DirectML/CPU feed,
+     camera switching, and background QThreads (no browser, no console).
 
-Usage:
-  python run.py                     # Runs unified production server (Web UI + APIs)
-  python run.py --source synthetic  # Runs with simulated entrance gate video feed
-  python run.py --device cpu        # Forces CPU mode
-  python run.py --check-license     # Force-enables startup license validation
+Optional flags:
+  python run.py --source synthetic  # Start with simulated entrance gate feed
+  python run.py --check-license     # Force startup HTTPS license validation
+  python run.py --api-only          # Run internal FastAPI engine on 127.0.0.1 only
 """
 
+import argparse
 import os
 import sys
-import argparse
 from pathlib import Path
 
 BASE_DIR = (
@@ -36,17 +40,16 @@ if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
                 pass
 
 from app.core.config import settings
-from app.core.device import resolve_device
-from app.core.license_check import enforce_license_or_exit, LicenseMonitor
+from app.core.license_check import LicenseMonitor, enforce_license_or_exit
+from app.core.logging_config import setup_logging
 from app.database.connection import init_db
 
 
 def _ensure_stdio_for_windowed_mode() -> bool:
     """
     When built with Nuitka `--windows-console-mode=disable`, sys.stdout and
-    sys.stderr are None. Redirect them to `logs/runtime_console.log` so print()
-    and uvicorn never raise AttributeError on missing console streams.
-    Returns True if running in console-disabled/windowed mode.
+    sys.stderr are None. Redirect them to `logs/runtime_console.log` so logging
+    and third-party libraries never raise AttributeError on missing streams.
     """
     windowed = sys.stdout is None or sys.stderr is None
     if windowed:
@@ -63,45 +66,78 @@ def _ensure_stdio_for_windowed_mode() -> bool:
     return windowed
 
 
-def print_banner(device_str: str, diag: dict, license_status: str):
-    onnx_providers = diag.get("onnx_providers", [])
-    print("=" * 72)
-    print("    AUTOMATIC NUMBER PLATE RECOGNITION (ANPR) & GATE ACCESS SYSTEM    ")
-    print("                      PRODUCTION RBAC SUITE                           ")
-    print("=" * 72)
-    print(f"  ● Inference Backend:    {settings.INFERENCE_BACKEND.upper()}")
-    print(f"  ● Compute Device:       {device_str.upper()} ({diag.get('name', 'CPU')})")
-    if onnx_providers:
-        print(f"  ● ONNX Providers:       {', '.join(onnx_providers)}")
-    if "total_memory_mb" in diag:
-        print(f"  ● GPU VRAM:             {diag.get('total_memory_mb'):,.0f} MB")
-    print(f"  ● License Status:       {license_status}")
-    print(f"  ● Video Source:         {settings.CAMERA_SOURCE}")
-    print(f"  ● Event Strategy:       {settings.EVENT_STRATEGY}")
-    print(f"  ● Recognition Cooldown: {settings.RECOGNITION_COOLDOWN}s")
-    print(f"  ● SQLite Database:      {settings.DATABASE_URL}")
-    print(f"  ● Mobile Push (ntfy):   {settings.NTFY_SERVER}/{settings.NTFY_TOPIC}")
-    print("-" * 72)
-    print(f"  ★ Production Web App:   http://localhost:{settings.API_PORT}/ (Mobile & Desktop)")
-    print(f"  ★ REST API Docs:        http://localhost:{settings.API_PORT}/docs")
-    print(f"  ★ Default Admin Login:  admin / admin123 (Role: ADMIN)")
-    print(f"  ★ Default Guard Login:  guard / guard123 (Role: OPERATOR)")
-    print(f"  ★ Default Audit Login:  auditor / auditor123 (Role: AUDITOR)")
-    print("=" * 72)
-    print("Press CTRL+C to gracefully stop all services.")
-    print("=" * 72 + "\n")
+def _launch_native_gui(license_status: str) -> int:
+    """Launch the native PyQt6 RBAC Login Dialog followed by the Main Window."""
+    from PyQt6.QtWidgets import QApplication
+    from app.gui.backend_bridge import BackendBridge
+    from app.gui.dialogs import LoginDialog
+    from app.gui.main_window import MainWindow
+    from app.gui.styles import DARK_STYLESHEET
+
+    qt_app = QApplication(sys.argv)
+    qt_app.setApplicationName(settings.APP_NAME)
+    qt_app.setStyle("Fusion")
+    qt_app.setStyleSheet(DARK_STYLESHEET)
+
+    bridge = BackendBridge()
+
+    # Show native RBAC Login Dialog before opening the Main Window
+    login_dlg = LoginDialog(bridge)
+    if login_dlg.exec() != LoginDialog.DialogCode.Accepted or login_dlg.session is None:
+        return 0
+
+    window = MainWindow(
+        bridge=bridge,
+        session=login_dlg.session,
+        auto_start_engine=True,
+        license_status=license_status,
+    )
+
+    # Periodic disclosed license monitor hooked safely to Qt main thread
+    monitor = LicenseMonitor(
+        on_revoked=lambda res: window.license_revoked_signal.emit(res.user_message)
+    )
+    monitor.start()
+
+    window.show()
+    try:
+        return qt_app.exec()
+    finally:
+        monitor.stop()
+        bridge.stop_pipeline()
+
+
+def _launch_internal_api(port: int, windowed: bool) -> None:
+    """Optional loopback-only (127.0.0.1) FastAPI engine mode for local tooling."""
+    import uvicorn
+    from app.main import app as fastapi_app
+
+    monitor = LicenseMonitor()
+    monitor.start()
+    try:
+        uvicorn_kwargs = {
+            "host": "127.0.0.1",  # Strictly loopback-only; never exposed beyond localhost
+            "port": port,
+            "log_level": "info",
+            "reload": False,
+        }
+        if windowed:
+            uvicorn_kwargs["log_config"] = None
+        uvicorn.run(fastapi_app, **uvicorn_kwargs)
+    finally:
+        monitor.stop()
 
 
 def main():
     windowed = _ensure_stdio_for_windowed_mode()
+    setup_logging()
 
-    parser = argparse.ArgumentParser(description="ANPR Production Master Launcher")
+    parser = argparse.ArgumentParser(description="ANPR Native Windows Desktop Application")
     parser.add_argument("--source", type=str, help="Override camera source ('0', video path, or 'synthetic')")
-    parser.add_argument("--device", type=str, help="Override compute device ('auto', 'cuda', 'cpu')")
-    parser.add_argument("--port", type=int, default=settings.API_PORT, help="Port to run server on")
-    parser.add_argument("--host", type=str, default=settings.API_HOST, help="Host binding")
+    parser.add_argument("--device", type=str, help="Override compute device ('auto', 'cpu')")
     parser.add_argument("--check-license", action="store_true", help="Force startup HTTPS license validation")
-
+    parser.add_argument("--api-only", action="store_true", help="Run internal FastAPI engine strictly on 127.0.0.1")
+    parser.add_argument("--port", type=int, default=settings.API_PORT, help="Loopback port for --api-only mode")
     args = parser.parse_args()
 
     if args.source:
@@ -111,38 +147,19 @@ def main():
     if args.check_license:
         settings.LICENSE_CHECK_ENABLED = True
 
-    # 1. Disclosed startup license check (exits cleanly with clear notice if inactive)
+    # 1. Disclosed startup license check BEFORE any window opens
     lic_result = enforce_license_or_exit(force=args.check_license)
     os.environ["_ANPR_LICENSE_VERIFIED_PID"] = str(os.getpid())
 
-    # 2. Initialize SQLite database and seed default RBAC users
+    # 2. Initialize SQLite database and seed default RBAC accounts
     init_db()
 
-    # 3. Dynamic hardware / ONNX Runtime provider resolution
-    resolved_dev, diag = resolve_device(settings.DEVICE)
-    print_banner(resolved_dev, diag, lic_result.status)
-
-    # 4. Start optional periodic license re-check monitor (only active when LICENSE_CHECK_ENABLED=true)
-    monitor = LicenseMonitor()
-    monitor.start()
-
-    # 5. Direct ASGI import ensures Nuitka statically bundles app.main and all routers
-    import uvicorn
-    from app.main import app as fastapi_app
-
-    try:
-        uvicorn_kwargs = {
-            "host": args.host,
-            "port": args.port,
-            "log_level": "info",
-            "reload": False,
-        }
-        if windowed:
-            # Avoid uvicorn's default TTY formatter crashing when console is disabled
-            uvicorn_kwargs["log_config"] = None
-        uvicorn.run(fastapi_app, **uvicorn_kwargs)
-    finally:
-        monitor.stop()
+    # 3. Launch Native PyQt6 GUI (default) or internal loopback-only API engine
+    if args.api_only:
+        _launch_internal_api(args.port, windowed)
+    else:
+        exit_code = _launch_native_gui(lic_result.status)
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

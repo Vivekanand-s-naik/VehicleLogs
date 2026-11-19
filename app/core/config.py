@@ -126,8 +126,8 @@ class Settings(BaseSettings):
     LOG_MAX_BYTES: int = Field(default=10 * 1024 * 1024)  # 10 MB
     LOG_BACKUP_COUNT: int = Field(default=5)
 
-    # API Server
-    API_HOST: str = "0.0.0.0"
+    # API Server (internal loopback engine only — never exposed beyond localhost)
+    API_HOST: str = "127.0.0.1"
     API_PORT: int = 8000
     API_KEY: Optional[str] = Field(default=None, description="Optional API key for administrative endpoints")
 
