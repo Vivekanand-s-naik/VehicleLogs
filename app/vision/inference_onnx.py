@@ -13,6 +13,7 @@ with the original PyTorch models.
 
 import ast
 import os
+import sys
 import logging
 import threading
 from dataclasses import dataclass
@@ -20,6 +21,21 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
+
+# Ensure bundled native DLLs (DirectML.dll, onnxruntime.dll, onnxruntime_providers_shared.dll)
+# are discoverable by the Windows loader in Nuitka standalone distributions before importing ORT.
+if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+    _dll_roots = []
+    if "__compiled__" in globals() or getattr(sys, "frozen", False):
+        _exe_dir = Path(sys.executable).resolve().parent
+        _dll_roots.extend([_exe_dir, _exe_dir / "onnxruntime" / "capi"])
+    for _dir in _dll_roots:
+        if _dir.is_dir():
+            try:
+                os.add_dll_directory(str(_dir))
+            except OSError:
+                pass
+
 import onnxruntime as ort
 
 logger = logging.getLogger("anpr.inference_onnx")
@@ -45,10 +61,17 @@ def select_onnx_providers(
     return selected
 
 
-def build_session_options(intra_threads: Optional[int] = None) -> ort.SessionOptions:
+def build_session_options(
+    intra_threads: Optional[int] = None,
+    use_dml: bool = False,
+) -> ort.SessionOptions:
     """Create optimized ONNX Runtime SessionOptions without thread spin-wait contention."""
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    if use_dml:
+        # Recommended by Microsoft for DirectML stability across Windows GPU drivers
+        so.enable_mem_pattern = False
     so.intra_op_num_threads = intra_threads or min(4, max(1, (os.cpu_count() or 4) // 2))
     so.inter_op_num_threads = 1
     try:
@@ -90,37 +113,60 @@ class ONNXYOLODetector:
         self._lock = threading.Lock()
 
         chosen_providers = select_onnx_providers(providers or PREFERRED_PROVIDERS)
-        sess_options = build_session_options()
 
-        logger.info(
-            f"Loading ONNX model '{self.model_path.name}' with providers={chosen_providers}..."
-        )
-        self.session = ort.InferenceSession(
-            str(self.model_path),
-            sess_options=sess_options,
-            providers=chosen_providers,
-        )
+        self.session = self._create_and_warm_session(chosen_providers)
         self.active_providers: List[str] = self.session.get_providers()
-
-        inp = self.session.get_inputs()[0]
-        self.input_name: str = inp.name
-        self.output_name: str = self.session.get_outputs()[0].name
-
-        # Read static input spatial dimensions (default 640x640 if dynamic)
-        shape = inp.shape
-        self.input_height: int = int(shape[2]) if isinstance(shape[2], int) and shape[2] > 0 else 640
-        self.input_width: int = int(shape[3]) if isinstance(shape[3], int) and shape[3] > 0 else 640
 
         # Load class names from ONNX metadata (Ultralytics embeds `names`)
         self.names: Dict[int, str] = class_names or self._parse_metadata_names()
 
-        # Pre-warm session so first live frame has low latency
-        dummy = np.zeros((1, 3, self.input_height, self.input_width), dtype=np.float32)
-        self.session.run([self.output_name], {self.input_name: dummy})
         logger.info(
             f"ONNX model '{self.model_path.name}' ready "
             f"(input={self.input_width}x{self.input_height}, active_providers={self.active_providers})."
         )
+
+    def _init_session_once(self, provider_list: Sequence[str]) -> ort.InferenceSession:
+        """Create an InferenceSession with `provider_list`, inspect I/O, and run warmup."""
+        use_dml = "DmlExecutionProvider" in provider_list
+        sess_options = build_session_options(use_dml=use_dml)
+        logger.info(
+            f"Loading ONNX model '{self.model_path.name}' with providers={list(provider_list)}..."
+        )
+        session = ort.InferenceSession(
+            str(self.model_path),
+            sess_options=sess_options,
+            providers=list(provider_list),
+        )
+        inp = session.get_inputs()[0]
+        self.input_name = inp.name
+        self.output_name = session.get_outputs()[0].name
+
+        # Read static input spatial dimensions (default 640x640 if dynamic)
+        shape = inp.shape
+        self.input_height = int(shape[2]) if isinstance(shape[2], int) and shape[2] > 0 else 640
+        self.input_width = int(shape[3]) if isinstance(shape[3], int) and shape[3] > 0 else 640
+
+        # Pre-warm session so first live frame has low latency and DirectML issues surface immediately
+        dummy = np.zeros((1, 3, self.input_height, self.input_width), dtype=np.float32)
+        session.run([self.output_name], {self.input_name: dummy})
+        return session
+
+    def _create_and_warm_session(self, chosen_providers: Sequence[str]) -> ort.InferenceSession:
+        """
+        Try initializing with `chosen_providers` (e.g. DirectML + CPU).
+        If DmlExecutionProvider fails to load or execute warmup, log a warning and
+        fall back cleanly to CPUExecutionProvider instead of crashing.
+        """
+        try:
+            return self._init_session_once(chosen_providers)
+        except Exception as exc:
+            if "DmlExecutionProvider" in chosen_providers:
+                logger.warning(
+                    f"DmlExecutionProvider failed for '{self.model_path.name}' ({exc}); "
+                    "falling back cleanly to CPUExecutionProvider."
+                )
+                return self._init_session_once(["CPUExecutionProvider"])
+            raise
 
     def _parse_metadata_names(self) -> Dict[int, str]:
         try:

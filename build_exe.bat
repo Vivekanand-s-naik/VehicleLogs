@@ -78,11 +78,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo Ensuring single clean opencv-python build (removing conflicting opencv-python-headless)...
+"%VENV_PIP%" uninstall -y opencv-python-headless >nul 2>&1
+"%VENV_PIP%" install --no-deps --force-reinstall "opencv-python>=4.8.0,<4.12.0"
+if errorlevel 1 (
+    echo [ERROR] Failed to configure clean opencv-python
+    exit /b 1
+)
+
 echo Ensuring onnxruntime-directml (DmlExecutionProvider) is not shadowed by CPU-only onnxruntime...
 "%VENV_PIP%" uninstall -y onnxruntime >nul 2>&1
 "%VENV_PIP%" install --no-deps --force-reinstall "onnxruntime-directml>=1.17.0"
 if errorlevel 1 (
     echo [ERROR] Failed to configure onnxruntime-directml
+    exit /b 1
+)
+
+set "ORT_CAPI_DIR=%CD%\%BUILD_VENV%\Lib\site-packages\onnxruntime\capi"
+if not exist "%ORT_CAPI_DIR%\DirectML.dll" (
+    echo [ERROR] DirectML.dll not found in %ORT_CAPI_DIR%
     exit /b 1
 )
 
@@ -124,6 +138,9 @@ if exist "dist\run.build" rmdir /s /q "dist\run.build"
     --include-package=app ^
     --include-module=inference_onnx ^
     --include-module=license_check ^
+    --include-package=onnxruntime ^
+    --include-module=onnxruntime.capi.onnxruntime_pybind11_state ^
+    --user-package-configuration-file=nuitka_onnx_dml.yml ^
     --include-package=uvicorn.logging ^
     --include-package=uvicorn.loops ^
     --include-package=uvicorn.protocols ^
@@ -167,6 +184,38 @@ set "DIST_DIR=dist\run.dist"
 if not exist "%DIST_DIR%\ANPR_GateSystem.exe" (
     echo [ERROR] Expected executable not found at %DIST_DIR%\ANPR_GateSystem.exe
     exit /b 1
+)
+
+echo Aligning VC++ 14.40+ runtime DLLs and verifying ONNX/DirectML native binaries...
+REM Nuitka may bundle an older VS2019 msvcp140.dll (14.29) which causes WinError 1114
+REM (ERROR_DLL_INIT_FAILED) when VS2022-built onnxruntime_pybind11_state.pyd initializes.
+for %%D in (msvcp140.dll msvcp140_1.dll vcruntime140.dll vcruntime140_1.dll) do (
+    if exist "%SystemRoot%\System32\%%D" (
+        copy /Y "%SystemRoot%\System32\%%D" "%DIST_DIR%\%%D" >nul
+    )
+)
+
+REM Ensure DirectML.dll is present both in onnxruntime\capi\ and at bundle root
+if not exist "%DIST_DIR%\DirectML.dll" (
+    copy /Y "%ORT_CAPI_DIR%\DirectML.dll" "%DIST_DIR%\DirectML.dll" >nul
+)
+if not exist "%DIST_DIR%\onnxruntime\capi\DirectML.dll" (
+    copy /Y "%ORT_CAPI_DIR%\DirectML.dll" "%DIST_DIR%\onnxruntime\capi\DirectML.dll" >nul
+)
+
+REM Verify DirectML.dll and core ONNX Runtime native binaries are present in output folder
+for %%F in (
+    "%DIST_DIR%\DirectML.dll"
+    "%DIST_DIR%\onnxruntime\capi\DirectML.dll"
+    "%DIST_DIR%\onnxruntime\capi\onnxruntime.dll"
+    "%DIST_DIR%\onnxruntime\capi\onnxruntime_providers_shared.dll"
+    "%DIST_DIR%\onnxruntime\capi\onnxruntime_pybind11_state.pyd"
+) do (
+    if not exist %%F (
+        echo [ERROR] Required ONNX native binary missing from bundle: %%F
+        exit /b 1
+    )
+    echo   Verified native binary: %%~nxF
 )
 
 (

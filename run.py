@@ -26,6 +26,15 @@ BASE_DIR = (
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+# Ensure bundled ONNX Runtime / DirectML native DLLs are discoverable before any imports
+if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+    for _dll_dir in (BASE_DIR, BASE_DIR / "onnxruntime" / "capi"):
+        if _dll_dir.is_dir():
+            try:
+                os.add_dll_directory(str(_dll_dir))
+            except OSError:
+                pass
+
 from app.core.config import settings
 from app.core.device import resolve_device
 from app.core.license_check import enforce_license_or_exit, LicenseMonitor

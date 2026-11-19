@@ -44,6 +44,30 @@ def test_select_onnx_providers_prioritizes_directml():
         assert selected_cpu == ["CPUExecutionProvider"]
 
 
+def test_dml_failure_falls_back_to_cpu_without_crashing(caplog):
+    """Verify ONNXYOLODetector logs a warning and falls back to CPUExecutionProvider if DirectML fails."""
+    import logging
+    import onnxruntime as ort
+
+    real_session_cls = ort.InferenceSession
+    calls = []
+
+    def flaky_session(model_path, sess_options=None, providers=None):
+        calls.append(list(providers or []))
+        if providers and "DmlExecutionProvider" in providers:
+            raise RuntimeError("Simulated DirectML adapter init failure")
+        return real_session_cls(model_path, sess_options=sess_options, providers=["CPUExecutionProvider"])
+
+    with caplog.at_level(logging.WARNING, logger="anpr.inference_onnx"), \
+         patch("app.vision.inference_onnx.ort.get_available_providers", return_value=["DmlExecutionProvider", "CPUExecutionProvider"]), \
+         patch("app.vision.inference_onnx.ort.InferenceSession", side_effect=flaky_session):
+        det = ONNXYOLODetector(BASE_DIR / "models" / "license_plate_detector.onnx")
+
+    assert calls == [["DmlExecutionProvider", "CPUExecutionProvider"], ["CPUExecutionProvider"]]
+    assert det.active_providers == ["CPUExecutionProvider"]
+    assert any("falling back" in rec.message.lower() for rec in caplog.records)
+
+
 def test_inference_onnx_zero_training_framework_imports():
     """
     Prove that inference_onnx, PlateDetector, and VehicleDetector import cleanly

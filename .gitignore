@@ -29,6 +29,25 @@ logs/*.log
 # YOLO Models
 models/*.pt
 
+# Build artifacts / distribution
+dist/
+build/
+*.exe
+*.spec
+.venv-runtime-build/
+.venv/
+*.egg-info/
+
+# Python caches (all levels)
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Dashboard / frontend
+node_modules/
+.next/
+out/
+
 # OS files
 .DS_Store
 Thumbs.db

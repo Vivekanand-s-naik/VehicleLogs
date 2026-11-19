@@ -1,0 +1,11 @@
+# Nuitka User Package Configuration for onnxruntime-directml on Windows
+# Forces Nuitka's native DLL bundler to include DirectML.dll alongside
+# onnxruntime.dll and onnxruntime_providers_shared.dll inside onnxruntime/capi/.
+- module-name: 'onnxruntime'
+  dlls:
+    - from_filenames:
+        relative_path: 'capi'
+        prefixes:
+          - 'DirectML'
+          - 'onnxruntime'
+      when: 'win32'
